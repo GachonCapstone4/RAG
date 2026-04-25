@@ -125,7 +125,7 @@ def _index_knowledge_documents(
   chunk_overlap: int | None = None,
 ) -> KnowledgeIndexResponse:
   # 외부용 ingest API와 내부용 index API를 연결하는 얇은 어댑터다.
-  # 외부 계약은 단순하게 유지하고, 실제 chunk/index 구현은 재사용한다. 체크
+  # 외부 계약은 단순하게 유지하고, 실제 chunk/index 구현은 재사용한다.
   request = KnowledgeIndexRequest(
     request_id=request_id,
     user_id=user_id,

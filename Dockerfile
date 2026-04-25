@@ -20,9 +20,11 @@ RUN addgroup --system rag \
 
 COPY pyproject.toml README.md ./
 COPY app ./app
+COPY docker ./docker
 
 RUN pip install . \
   && mkdir -p /app/.rag-data/chroma \
+  && chmod +x /app/docker/start-rag-combined.sh \
   && chown -R rag:rag /app
 
 USER rag
@@ -32,4 +34,4 @@ EXPOSE 8090
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD python -c "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.getenv(\"RAG_PORT\", \"8090\")}/health', timeout=3).read()" || exit 1
 
-CMD ["sh", "-c", "exec uvicorn app.main:app --host \"${RAG_HOST}\" --port \"${RAG_PORT}\" --log-level info"]
+CMD ["/app/docker/start-rag-combined.sh"]
