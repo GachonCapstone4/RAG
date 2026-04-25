@@ -42,6 +42,22 @@ def _extract_error_message(raw_body: str) -> str:
 
 
 @dataclass
+class OpenAICompatibleApiError(Exception):
+  path: str
+  message: str
+  status_code: int | None = None
+  detail: str | None = None
+
+  def __str__(self) -> str:
+    parts = [self.message, f"path={self.path}"]
+    if self.status_code is not None:
+      parts.append(f"status={self.status_code}")
+    if self.detail:
+      parts.append(f"detail={self.detail}")
+    return ", ".join(parts)
+
+
+@dataclass
 class OpenAICompatibleApiClient:
   base_url: str
   api_key: str
@@ -96,19 +112,34 @@ class OpenAICompatibleApiClient:
     except error.HTTPError as exc:
       error_body = exc.read().decode("utf-8", errors="replace")
       detail = _extract_error_message(error_body)
-      raise ValueError(
-        f"LLM API 요청이 실패했습니다. status={exc.code}, detail={detail}"
+      raise OpenAICompatibleApiError(
+        path=path,
+        status_code=exc.code,
+        detail=detail,
+        message="LLM API 요청이 실패했습니다.",
       ) from exc
     except error.URLError as exc:
-      raise ValueError(f"LLM API 서버에 연결하지 못했습니다: {exc.reason}") from exc
+      raise OpenAICompatibleApiError(
+        path=path,
+        detail=str(exc.reason),
+        message="LLM API 서버에 연결하지 못했습니다.",
+      ) from exc
 
     try:
       parsed = json.loads(response_body)
     except json.JSONDecodeError as exc:
-      raise ValueError("LLM API 응답이 JSON 형식이 아닙니다.") from exc
+      raise OpenAICompatibleApiError(
+        path=path,
+        detail=response_body[:500],
+        message="LLM API 응답이 JSON 형식이 아닙니다.",
+      ) from exc
 
     if not isinstance(parsed, dict):
-      raise ValueError("LLM API 응답 형식이 예상과 다릅니다.")
+      raise OpenAICompatibleApiError(
+        path=path,
+        detail=str(type(parsed).__name__),
+        message="LLM API 응답 형식이 예상과 다릅니다.",
+      )
 
     return parsed
 

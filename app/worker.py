@@ -27,6 +27,7 @@ from app.schemas import (
   TemplateMatchRequest,
 )
 from app.services.draft_service import run_onboarding_template_draft
+from app.services.openai_compatible_client import OpenAICompatibleApiError
 
 
 logger = logging.getLogger(__name__)
@@ -236,6 +237,12 @@ class RagMqWorker:
     )
 
   def _build_error(self, error: Exception) -> ErrorPayload:
+    if isinstance(error, OpenAICompatibleApiError):
+      if error.status_code is not None:
+        code = f"EXTERNAL_API_HTTP_{error.status_code}"
+      else:
+        code = "EXTERNAL_API_CONNECTION_ERROR"
+      return ErrorPayload(code=code, message=str(error))
     if isinstance(error, HTTPException):
       return ErrorPayload(code=f"HTTP_{error.status_code}", message=str(error.detail))
     if isinstance(error, ValidationError):
@@ -243,6 +250,10 @@ class RagMqWorker:
     return ErrorPayload(code=error.__class__.__name__.upper(), message=str(error))
 
   def _is_retryable_error(self, error: Exception) -> bool:
+    if isinstance(error, OpenAICompatibleApiError):
+      if error.status_code is None:
+        return True
+      return error.status_code == 429 or error.status_code >= 500
     if isinstance(error, HTTPException):
       detail = str(error.detail)
       if error.status_code == 404 and "Document file not found" in detail:
@@ -255,6 +266,46 @@ class RagMqWorker:
     if isinstance(error, ValueError):
       return False
     return True
+
+  def _log_job_error(
+    self,
+    *,
+    job_type: str,
+    job_id: str,
+    request_id: str,
+    user_id: int,
+    target_type: str | None,
+    target_id: str | None,
+    retry_count: int,
+    error: Exception,
+  ) -> None:
+    if isinstance(error, OpenAICompatibleApiError):
+      logger.warning(
+        "RAG job 외부 API 실패: job_type=%s job_id=%s request_id=%s user_id=%s "
+        "target_type=%s target_id=%s retry_count=%s api_path=%s status=%s detail=%s",
+        job_type,
+        job_id,
+        request_id,
+        user_id,
+        target_type,
+        target_id,
+        retry_count,
+        error.path,
+        error.status_code,
+        error.detail,
+      )
+      return
+    logger.exception(
+      "RAG job 처리 실패: job_type=%s job_id=%s request_id=%s user_id=%s "
+      "target_type=%s target_id=%s retry_count=%s",
+      job_type,
+      job_id,
+      request_id,
+      user_id,
+      target_type,
+      target_id,
+      retry_count,
+    )
 
   def _publish_failed_result(
     self,
@@ -318,6 +369,16 @@ class RagMqWorker:
         )
       )
     except Exception as error:
+      self._log_job_error(
+        job_type="knowledge.ingest",
+        job_id=message.job_id,
+        request_id=message.request_id,
+        user_id=message.user_id,
+        target_type="knowledge",
+        target_id=target_id,
+        retry_count=retry_count,
+        error=error,
+      )
       if self._should_retry(error, retry_count):
         raise RetryableWorkerError(str(error)) from error
       error_payload = self._build_error(error)
@@ -395,6 +456,16 @@ class RagMqWorker:
         )
       )
     except Exception as error:
+      self._log_job_error(
+        job_type="templates.index",
+        job_id=f"template-index-{message.user_id}-{message.request_id}",
+        request_id=message.request_id,
+        user_id=message.user_id,
+        target_type="template",
+        target_id=message.request_id,
+        retry_count=retry_count,
+        error=error,
+      )
       if self._should_retry(error, retry_count):
         raise RetryableWorkerError(str(error)) from error
       error_payload = self._build_error(error)
@@ -467,6 +538,16 @@ class RagMqWorker:
         )
       )
     except Exception as error:
+      self._log_job_error(
+        job_type="templates.match",
+        job_id=message.job_id,
+        request_id=message.request_id,
+        user_id=message.user_id,
+        target_type="email",
+        target_id=target_id,
+        retry_count=retry_count,
+        error=error,
+      )
       if self._should_retry(error, retry_count):
         raise RetryableWorkerError(str(error)) from error
       error_payload = self._build_error(error)
@@ -547,6 +628,16 @@ class RagMqWorker:
         template_count=message.template_count,
       )
     except Exception as error:
+      self._log_job_error(
+        job_type="draft.generate",
+        job_id=message.job_id,
+        request_id=message.request_id,
+        user_id=message.user_id,
+        target_type="category",
+        target_id=target_id,
+        retry_count=retry_count,
+        error=error,
+      )
       if self._should_retry(error, retry_count):
         raise RetryableWorkerError(str(error)) from error
       error_payload = self._build_error(error)
