@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from pathlib import Path
+from urllib import request as urllib_request
 
 import pymupdf
 
@@ -36,6 +37,38 @@ def extract_text_from_payload(file_name: str, media_type: str, content_base64: s
     file_name=file_name,
     media_type=media_type,
   )
+
+
+def extract_text_from_url(url: str, file_name: str, media_type: str) -> str:
+  # 운영 환경에서는 Backend가 S3 presigned URL을 전달하고,
+  # RAG는 AWS 키 없이 임시 URL에서 파일 bytes만 내려받는다.
+  raw_bytes = _download_with_limit(url)
+  return _extract_text_from_bytes(
+    raw_bytes=raw_bytes,
+    file_name=file_name,
+    media_type=media_type,
+  )
+
+
+def _download_with_limit(url: str) -> bytes:
+  request = urllib_request.Request(url, headers={"User-Agent": "emailassist-rag/0.1"})
+  with urllib_request.urlopen(request, timeout=30) as response:
+    content_length = response.headers.get("Content-Length")
+    if content_length and int(content_length) > settings.max_upload_bytes:
+      raise ValueError(f"Document download exceeds max_upload_bytes: {content_length}")
+
+    chunks: list[bytes] = []
+    total_size = 0
+    while True:
+      chunk = response.read(64 * 1024)
+      if not chunk:
+        break
+      total_size += len(chunk)
+      if total_size > settings.max_upload_bytes:
+        raise ValueError(f"Document download exceeds max_upload_bytes: {total_size}")
+      chunks.append(chunk)
+
+  return b"".join(chunks)
 
 
 def _extract_text_from_bytes(*, raw_bytes: bytes, file_name: str, media_type: str) -> str:

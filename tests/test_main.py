@@ -69,6 +69,35 @@ def test_knowledge_ingest_reads_local_manual_file(tmp_path):
   assert response.indexed_source_ids == ["manual-1"]
 
 
+def test_knowledge_ingest_reads_presigned_url(monkeypatch):
+  def _stub_extract_text_from_url(url: str, file_name: str, media_type: str) -> str:
+    assert url == "https://example.com/manual.pdf?signature=stub"
+    assert file_name == "manual.pdf"
+    assert media_type == "application/pdf"
+    return "계약 해지는 담당자 승인 후 처리됩니다."
+
+  monkeypatch.setattr("app.main.extract_text_from_url", _stub_extract_text_from_url)
+
+  response = ingest_knowledge(
+    KnowledgeIngestRequest(
+      request_id="req-ingest-url",
+      user_id=1,
+      manuals=[
+        KnowledgeManualInput(
+          source_id="manual-url-1",
+          file_name="manual.pdf",
+          presigned_url="https://example.com/manual.pdf?signature=stub",
+        )
+      ],
+    )
+  )
+
+  assert response.status == "SUCCESS"
+  assert response.indexed_document_count == 1
+  assert response.indexed_chunk_count >= 1
+  assert response.indexed_source_ids == ["manual-url-1"]
+
+
 def test_templates_match_builds_canonical_text_from_email_fields():
   from app.main import index_templates
 

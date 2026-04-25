@@ -36,6 +36,7 @@ from app.services.document_parser import (
   UnsupportedDocumentError,
   extract_text_from_file_path,
   extract_text_from_payload,
+  extract_text_from_url,
 )
 from app.services.index_store import IndexRecord
 from app.services.runtime import embedding_service, knowledge_namespace, template_namespace, vector_store
@@ -253,9 +254,16 @@ def ingest_knowledge(request: KnowledgeIngestRequest) -> KnowledgeIngestResponse
       except Exception as error:  # pragma: no cover
         raise HTTPException(status_code=500, detail=f"Failed to extract text from manual: {error}") from error
     elif manual.presigned_url:
-      # 운영에선 presigned URL을 받아 RAG가 직접 다운로드하는 방향이 자연스럽다.
-      # 현재 로컬 구현은 아직 이 경로를 열어두지 않았다.
-      raise HTTPException(status_code=501, detail="presigned_url ingestion is not implemented yet in local mode.")
+      try:
+        content = extract_text_from_url(
+          url=manual.presigned_url,
+          file_name=manual.file_name,
+          media_type=PDF_MEDIA_TYPE,
+        )
+      except UnsupportedDocumentError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+      except Exception as error:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Failed to extract text from presigned URL: {error}") from error
     else:
       raise HTTPException(status_code=422, detail="manual은 local_path 또는 presigned_url 중 하나가 필요합니다.")
 
