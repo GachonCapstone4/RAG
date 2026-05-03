@@ -95,6 +95,7 @@ manual ingest
 
 - 생성된 템플릿을 template match용 컬렉션에 저장한다.
 - `canonical_text`가 없으면 RAG가 내부에서 생성한다.
+- `delete_template_ids`를 함께 보내면 해당 템플릿 벡터를 먼저 삭제한 뒤 신규 템플릿을 저장한다.
 
 요청:
 
@@ -102,11 +103,13 @@ manual ingest
 {
   "request_id": "req-template-index-001",
   "user_id": 1,
+  "delete_template_ids": [],
   "templates": [
     {
       "template_id": 101,
       "title": "견적 요청 응답",
       "intent": "견적 요청",
+      "canonical_text": "제목: 견적 요청 응답\n카테고리: 견적 요청\n본문: ...",
       "mail_tone": "formal",
       "domain": "Sales",
       "metadata": {
@@ -127,6 +130,7 @@ manual ingest
   "request_id": "req-template-index-001",
   "user_id": 1,
   "indexed_template_count": 1,
+  "deleted_template_count": 0,
   "template_ids": [101]
 }
 ```

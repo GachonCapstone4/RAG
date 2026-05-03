@@ -116,6 +116,21 @@ class VectorIndexStore:
         documents=documents,
       )
 
+  def delete(self, namespace: str, record_ids: list[str]) -> None:
+    if not record_ids or self._client is None:
+      return
+
+    collection = self._collections.get(namespace)
+    if collection is None:
+      try:
+        collection = self._client.get_collection(name=_collection_name(namespace))
+      except Exception:
+        return
+      self._collections[namespace] = collection
+
+    with self._lock:
+      collection.delete(ids=record_ids)
+
   def search(
     self,
     namespace: str,

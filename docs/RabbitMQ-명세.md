@@ -184,11 +184,13 @@ MQ 전환이 가능한 작업이다.
   "request_id": "req-template-index-001",
   "user_id": 1,
   "payload": {
+    "delete_template_ids": [],
     "templates": [
       {
         "template_id": 101,
         "title": "견적 요청 응답",
         "intent": "견적 요청",
+        "canonical_text": "제목: 견적 요청 응답\n카테고리: 견적 요청\n본문: ...",
         "mail_tone": "formal",
         "domain": "Sales",
         "metadata": {
@@ -209,6 +211,7 @@ MQ 전환이 가능한 작업이다.
   "status": "SUCCESS",
   "payload": {
     "indexed_template_count": 1,
+    "deleted_template_count": 0,
     "template_ids": [101]
   },
   "error": null

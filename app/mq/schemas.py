@@ -58,12 +58,14 @@ class TemplateIndexPayloadItem(MqModel):
   template_id: int
   title: str
   category_name: str
+  canonical_text: str | None = None
   email_tone: str | None = None
   metadata: TemplateMetadataInput = Field(default_factory=TemplateMetadataInput)
 
 
 class TemplateIndexPayload(MqModel):
   templates: list[TemplateIndexPayloadItem] = Field(default_factory=list)
+  delete_template_ids: list[int] = Field(default_factory=list)
 
 
 class TemplateIndexMessage(MqModel):

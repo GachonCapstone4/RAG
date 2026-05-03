@@ -223,12 +223,14 @@ class TemplateIndexRequest(ApiModel):
   request_id: str | None = None
   user_id: int
   templates: list[TemplateIndexItem]
+  delete_template_ids: list[int] = Field(default_factory=list)
 
 
 class TemplateIndexResponse(ApiModel):
   request_id: str | None = None
   user_id: int
   indexed_template_count: int
+  deleted_template_count: int = 0
   template_ids: list[int]
 
 

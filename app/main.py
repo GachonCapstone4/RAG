@@ -429,6 +429,9 @@ def search_knowledge(request: KnowledgeSearchRequest) -> KnowledgeSearchResponse
 @app.post("/v1/templates/index", response_model=TemplateIndexResponse)
 def index_templates(request: TemplateIndexRequest) -> TemplateIndexResponse:
   # 생성된 템플릿을 "나중에 다시 찾기 위한 검색용 표현"으로 저장하는 단계다.
+  delete_record_ids = [f"template:{template_id}" for template_id in request.delete_template_ids]
+  vector_store.delete(template_namespace(request.user_id), delete_record_ids)
+
   records: list[IndexRecord] = []
   template_ids: list[int] = []
 
@@ -471,6 +474,7 @@ def index_templates(request: TemplateIndexRequest) -> TemplateIndexResponse:
     request_id=request.request_id,
     user_id=request.user_id,
     indexed_template_count=len(template_ids),
+    deleted_template_count=len(delete_record_ids),
     template_ids=template_ids,
   )
 

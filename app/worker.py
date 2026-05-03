@@ -448,11 +448,13 @@ class RagMqWorker:
               template_id=item.template_id,
               title=item.title,
               category_name=item.category_name,
+              canonical_text=item.canonical_text,
               email_tone=item.email_tone,
               metadata=item.metadata,
             )
             for item in message.payload.templates
           ],
+          delete_template_ids=message.payload.delete_template_ids,
         )
       )
     except Exception as error:
@@ -504,6 +506,7 @@ class RagMqWorker:
         "status": "SUCCESS",
         "payload": {
           "indexed_template_count": response.indexed_template_count,
+          "deleted_template_count": response.deleted_template_count,
           "template_ids": response.template_ids,
         },
       },
