@@ -16,6 +16,7 @@ EmailAssist의 별도 RAG 서버입니다.
 - FastAPI 기반 최소 실행 스캐폴드
 - 기본 embedding backend는 외부 OpenAI 호환 임베딩 API
 - PDF는 LangChain 기반 semantic chunking을 우선 시도하고, 실패하면 기존 chunking으로 fallback
+- PDF 텍스트 추출 시 상단/하단 반복 라인과 하단 단독 페이지 번호를 보수적으로 제거
 - 기본 vector backend는 Chroma persistent collection
 - 외부 ChromaDB 서버 연결을 위한 `VECTOR_BACKEND=chroma_http` 지원
 - `knowledge/ingest`, `templates/index`, `templates/match` 기준 외부 API 정리

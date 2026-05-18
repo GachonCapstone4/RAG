@@ -1,12 +1,52 @@
 from __future__ import annotations
 
 import base64
+import re
+from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from urllib import request as urllib_request
 
 import pymupdf
 
 from app.config import settings
+
+PDF_HEADER_BAND_RATIO = 0.12
+PDF_FOOTER_BAND_RATIO = 0.10
+PDF_REPEATED_LINE_MIN_PAGES = 3
+PDF_REPEATED_LINE_MIN_RATIO = 0.6
+PDF_REPEATED_LINE_MAX_LENGTH = 120
+PDF_NON_KNOWLEDGE_PAGE_MARKERS = (
+  ("문서 기본 정보", "결재"),
+  ("문서 통제 정보", "개정 이력"),
+  ("Document basic info", "Approval", "Signature"),
+  ("Document Control", "Revision History"),
+  ("Document Control", "Approval"),
+)
+PDF_PAGE_NUMBER_PATTERN = re.compile(
+  r"^(?:page\s*)?\d{1,4}\s*(?:/|of)\s*\d{1,4}$|^-?\s*\d{1,4}\s*-?$",
+  re.IGNORECASE,
+)
+PDF_PROTECTED_LINE_PREFIXES = (
+  "SECTION ",
+  "Q.",
+  "A.",
+  "질문:",
+  "답변:",
+)
+
+
+@dataclass(frozen=True)
+class PdfTextLine:
+  text: str
+  top: float
+  bottom: float
+
+
+@dataclass(frozen=True)
+class PdfPageText:
+  lines: list[PdfTextLine]
+  page_height: float
 
 
 class UnsupportedDocumentError(ValueError):
@@ -99,20 +139,21 @@ def _extract_text_from_pdf(raw_bytes: bytes) -> str:
   document = pymupdf.open(stream=raw_bytes, filetype="pdf")
 
   try:
-    page_texts: list[str] = []
+    pdf_pages: list[PdfPageText] = []
     image_page_count = 0
-    total_text_length = 0
 
     for page in document:
-      page_text = page.get_text("text").strip()
+      page_text = _extract_pdf_page_text(page)
       image_count = len(page.get_images(full=True))
 
       if image_count > 0:
         image_page_count += 1
 
-      if page_text:
-        page_texts.append(page_text)
-        total_text_length += len(page_text)
+      if page_text.lines:
+        pdf_pages.append(page_text)
+
+    page_texts = _clean_pdf_page_texts(pdf_pages)
+    total_text_length = sum(len(page_text) for page_text in page_texts)
 
     extracted_text = "\n\n".join(page_texts).strip()
     looks_like_image_pdf = _looks_like_image_pdf(
@@ -137,6 +178,124 @@ def _extract_text_from_pdf(raw_bytes: bytes) -> str:
     raise UnsupportedDocumentError("PDF에서 추출 가능한 텍스트를 찾지 못했습니다.")
   finally:
     document.close()
+
+
+def _extract_pdf_page_text(page: pymupdf.Page) -> PdfPageText:
+  text_dict = page.get_text("dict")
+  lines: list[PdfTextLine] = []
+
+  for block in text_dict.get("blocks", []):
+    if not isinstance(block, dict) or block.get("type") != 0:
+      continue
+    for line in block.get("lines", []):
+      spans = line.get("spans", []) if isinstance(line, dict) else []
+      text = _normalize_pdf_line("".join(str(span.get("text", "")) for span in spans if isinstance(span, dict)))
+      if not text:
+        continue
+      bbox = line.get("bbox", [0, 0, 0, 0])
+      lines.append(PdfTextLine(text=text, top=float(bbox[1]), bottom=float(bbox[3])))
+
+  if not lines:
+    fallback_lines = [
+      _normalize_pdf_line(line)
+      for line in page.get_text("text").splitlines()
+      if _normalize_pdf_line(line)
+    ]
+    lines = [PdfTextLine(text=line, top=0.0, bottom=0.0) for line in fallback_lines]
+
+  return PdfPageText(lines=lines, page_height=float(page.rect.height))
+
+
+def _clean_pdf_page_texts(pages: list[PdfPageText]) -> list[str]:
+  repeated_margin_lines = _find_repeated_margin_lines(pages)
+  cleaned_pages: list[str] = []
+
+  for page in pages:
+    lines = [
+      line.text
+      for line in page.lines
+      if not _is_removable_pdf_noise_line(line, page.page_height, repeated_margin_lines)
+    ]
+    page_text = "\n".join(lines).strip()
+    if page_text and not _is_non_knowledge_pdf_page(page_text):
+      cleaned_pages.append(page_text)
+
+  return cleaned_pages
+
+
+def _find_repeated_margin_lines(pages: list[PdfPageText]) -> set[str]:
+  if len(pages) < PDF_REPEATED_LINE_MIN_PAGES:
+    return set()
+
+  line_pages: dict[str, set[int]] = defaultdict(set)
+  for page_index, page in enumerate(pages):
+    for line in page.lines:
+      if not _is_margin_line(line, page.page_height):
+        continue
+      key = _repeated_line_key(line.text)
+      if key:
+        line_pages[key].add(page_index)
+
+  required_count = max(
+    PDF_REPEATED_LINE_MIN_PAGES,
+    int(len(pages) * PDF_REPEATED_LINE_MIN_RATIO + 0.999),
+  )
+  return {key for key, indexes in line_pages.items() if len(indexes) >= required_count}
+
+
+def _is_removable_pdf_noise_line(line: PdfTextLine, page_height: float, repeated_margin_lines: set[str]) -> bool:
+  if _is_footer_line(line, page_height) and _is_page_number_line(line.text):
+    return True
+
+  key = _repeated_line_key(line.text)
+  return bool(key and key in repeated_margin_lines and _is_margin_line(line, page_height))
+
+
+def _is_margin_line(line: PdfTextLine, page_height: float) -> bool:
+  return _is_header_line(line, page_height) or _is_footer_line(line, page_height)
+
+
+def _is_header_line(line: PdfTextLine, page_height: float) -> bool:
+  return line.top <= page_height * PDF_HEADER_BAND_RATIO
+
+
+def _is_footer_line(line: PdfTextLine, page_height: float) -> bool:
+  return line.bottom >= page_height * (1 - PDF_FOOTER_BAND_RATIO)
+
+
+def _is_page_number_line(text: str) -> bool:
+  return bool(PDF_PAGE_NUMBER_PATTERN.match(text.strip()))
+
+
+def _repeated_line_key(text: str) -> str | None:
+  normalized = _normalize_pdf_line(text)
+  if not normalized or len(normalized) > PDF_REPEATED_LINE_MAX_LENGTH:
+    return None
+  if any(normalized.startswith(prefix) for prefix in PDF_PROTECTED_LINE_PREFIXES):
+    return None
+  if _is_page_number_line(normalized):
+    return None
+  return normalized.casefold()
+
+
+def _normalize_pdf_line(text: str) -> str:
+  return re.sub(r"[ \t]+", " ", text.replace("\u00a0", " ")).strip()
+
+
+def _is_non_knowledge_pdf_page(text: str) -> bool:
+  if not text:
+    return True
+  if _has_knowledge_line_marker(text):
+    return False
+  normalized = text.casefold()
+  return any(
+    all(marker.casefold() in normalized for marker in markers)
+    for markers in PDF_NON_KNOWLEDGE_PAGE_MARKERS
+  )
+
+
+def _has_knowledge_line_marker(text: str) -> bool:
+  return any(marker in text for marker in PDF_PROTECTED_LINE_PREFIXES)
 
 
 def _looks_like_image_pdf(*, page_count: int, image_page_count: int, total_text_length: int) -> bool:

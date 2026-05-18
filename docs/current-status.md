@@ -29,6 +29,7 @@
 
 - `PyMuPDF` 기반 PDF/TXT 텍스트 추출
 - 이미지형 PDF 감지 및 Tesseract OCR fallback
+- PDF 상단/하단 반복 라인과 하단 단독 페이지 번호에 대한 보수적 노이즈 제거
 - 기본 chunking
 - PDF 문서에 대한 semantic chunking 시도 + fallback
 - `embedding_api` 기반 외부 임베딩 API 호출
