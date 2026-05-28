@@ -1,227 +1,286 @@
-# EmailAssist RAG Server
+<div align="center">
 
-EmailAssist의 별도 RAG 서버입니다.
+# Maily RAG Server
 
-이 서비스는 아래 책임에 집중합니다.
+EmailAssist RAG
 
-- 비즈니스 프로필, FAQ, 업로드 문서 텍스트 정규화
-- chunking
-- embedding 생성
-- knowledge chunk 검색
-- template metadata embedding 저장 및 email-template candidate search
-- OpenAI 호환 LLM API 기반 생성 영역 관리
+FAQ, 업로드 문서, 템플릿 메타데이터를 검색 가능한 지식으로 바꾸고 메일 답변 후보 생성에 필요한 문맥을 제공하는 FastAPI 기반 RAG 서버입니다.
 
-현재 상태:
+![Python](https://img.shields.io/badge/python-3.11%2B-3776AB)
+![FastAPI](https://img.shields.io/badge/fastapi-0.115%2B-009688)
+![Chroma](https://img.shields.io/badge/vector-Chroma-5B5BD6)
+![RabbitMQ](https://img.shields.io/badge/mq-RabbitMQ-FF6600)
+![Docker](https://img.shields.io/badge/docker-ready-2496ED)
 
-- FastAPI 기반 최소 실행 스캐폴드
-- 기본 embedding backend는 외부 OpenAI 호환 임베딩 API
-- PDF는 LangChain 기반 semantic chunking을 우선 시도하고, 실패하면 기존 chunking으로 fallback
-- PDF 텍스트 추출 시 상단/하단 반복 라인과 하단 단독 페이지 번호를 보수적으로 제거
-- 기본 vector backend는 Chroma persistent collection
-- 외부 ChromaDB 서버 연결을 위한 `VECTOR_BACKEND=chroma_http` 지원
-- `knowledge/ingest`, `templates/index`, `templates/match` 기준 외부 API 정리
-- 이미지형 PDF는 Tesseract OCR fallback을 시도
-- 온보딩 템플릿 생성 책임을 `RAG` 내부 서비스로 관리
-- RabbitMQ worker 기반 `knowledge.ingest / draft / templates.index / templates.match` consume/publish 골격 추가
-- 현재 `rag/` 단독 테스트는 가능하지만, MQ end-to-end 송수신 검증은 별도 브로커 환경에서 확인이 필요
+[Overview](#overview) · [Features](#features) · [Quick Start](#quick-start) · [API](#api) · [RabbitMQ](#rabbitmq) · [Tech Stack](#tech-stack)
 
-## Folder Structure
+</div>
 
-`rag/`는 크게 `앱 코드`, `테스트`, `내부 문서`, `실행 설정`으로 나뉩니다.
+## Overview
 
-```text
-rag/
-├─ app/
-│  ├─ main.py
-│  ├─ worker.py
-│  ├─ config.py
-│  ├─ schemas.py
-│  ├─ mq/
-│  │  ├─ __init__.py
-│  │  └─ schemas.py
-│  └─ services/
-│     ├─ canonicalization.py
-│     ├─ claude_service.py
-│     ├─ chunking.py
-│     ├─ draft_service.py
-│     ├─ document_chunking.py
-│     ├─ document_parser.py
-│     ├─ embedding.py
-│     └─ index_store.py
-├─ tests/
-│  ├─ test_canonicalization.py
-│  ├─ test_chunking.py
-│  ├─ test_document_chunking.py
-│  ├─ test_draft_service.py
-│  └─ test_index_store.py
-├─ docs/
-│  ├─ README.md
-│  ├─ 연동-개요.md
-│  ├─ API-명세.md
-│  ├─ RabbitMQ-명세.md
-│  ├─ Chroma-저장구조-ERD.md
-│  ├─ current-status.md
-│  ├─ progress-log.md
-│  └─ sample-manual.txt
-├─ scripts/
-│  └─ check_chroma.py
-├─ pyproject.toml
-├─ .env.example
-├─ Dockerfile
-└─ README.md
-```
+`RAG`는 Maily 백엔드와 AI 파이프라인 사이에서 검색용 지식과 템플릿 후보를 관리합니다.
 
-## File Roles
+현재 구현은 HTTP API 서버와 RabbitMQ worker를 모두 제공합니다. HTTP API는 로컬 테스트와 직접 연동에 적합하고, MQ worker는 오래 걸리는 문서 ingest, 템플릿 인덱싱, 템플릿 매칭, 온보딩 템플릿 생성 작업을 비동기로 처리하기 위한 경로입니다.
 
-### App
+| Responsibility | Description |
+| --- | --- |
+| Knowledge ingest | FAQ와 PDF manual을 받아 텍스트 추출, chunking, embedding, Chroma upsert를 수행합니다. |
+| Text extraction | TXT/PDF payload, local path, presigned URL 입력을 처리합니다. |
+| PDF cleanup | 반복 header/footer, 하단 페이지 번호, 비지식성 표지/결재 페이지를 보수적으로 제거합니다. |
+| OCR fallback | 이미지형 PDF는 Tesseract OCR을 시도합니다. |
+| Template index | 템플릿 제목, intent, tone, domain, metadata를 canonical text로 만들고 벡터화합니다. |
+| Template match | 메일 canonical text와 가장 가까운 템플릿 후보를 검색합니다. |
+| Draft context | 온보딩 템플릿 생성 시 사용자별 FAQ/manual chunk를 찾아 참고 문맥으로 보강합니다. |
+| Vector storage | 사용자별 `knowledge:{user_id}`, `template:{user_id}` namespace를 Chroma collection으로 분리합니다. |
 
-- `app/main.py`
-  - FastAPI 엔드포인트 진입점
-  - 요청을 받아 canonicalization, indexing, matching 서비스에 연결
-- `app/config.py`
-  - 환경변수와 기본 설정값 관리
-  - embedding backend, chunking backend, chunk size 같은 런타임 설정 보관
-- `app/schemas.py`
-  - API 요청/응답 스키마 정의
-  - `AI/` 레포 naming과의 호환 alias 포함
+## Features
 
-### Services
-
-- `app/services/canonicalization.py`
-  - email canonical text
-  - template canonical text 생성 규칙 관리
-- `app/services/chunking.py`
-  - 기본 native chunking
-  - 문단 기반 + 길이 제한 + overlap 처리
-- `app/services/claude_service.py`
-  - OpenAI 호환 chat completion API 호출과 온보딩 템플릿 생성 프롬프트 관리
-  - mock mode 포함
-- `app/services/openai_compatible_client.py`
-  - 공통 인증 헤더와 `/v1/chat/completions`, `/v1/embeddings` 호출 처리
-- `app/services/draft_service.py`
-  - 온보딩 템플릿 생성 오케스트레이션
-  - variant별 템플릿 배열 조합
-- `app/services/document_chunking.py`
-  - 문서 종류별 chunking 진입점
-  - PDF는 LangChain semantic chunking 우선 시도
-  - 실패 시 native chunking으로 fallback
-- `app/services/document_parser.py`
-  - TXT/PDF 텍스트 추출
-  - 현재는 `PyMuPDF` 기반 추출
-  - 이미지형 PDF는 Tesseract OCR fallback 시도
-- `app/services/embedding.py`
-  - OpenAI 호환 embedding API backend 선택 및 생성
-  - hash fallback embedding
-- `app/services/index_store.py`
-  - namespace별 vector index 관리
-  - Chroma collection 기반 upsert / search
-  - user namespace를 collection 이름으로 분리
-  - metadata filter와 persistent directory / HTTP ChromaDB 연결 관리
-
-### Scripts
-
-- `scripts/check_chroma.py`
-  - local persistent Chroma 또는 HTTP ChromaDB collection 목록과 record 수 확인
-
-### Tests
-
-- `tests/test_canonicalization.py`
-  - canonical text 생성 규칙 테스트
-- `tests/test_chunking.py`
-  - native chunking 기본 동작 테스트
-- `tests/test_document_chunking.py`
-  - PDF LangChain 경로와 fallback 경로 테스트
-- `tests/test_draft_service.py`
-  - 온보딩 템플릿 생성 서비스 테스트
-- `tests/test_index_store.py`
-  - Chroma collection 기반 vector upsert / search 테스트
-
-### Docs
-
-- `docs/README.md`
-  - `rag/docs` 내부 문서 인덱스
-- `docs/연동-개요.md`
-  - Backend, AI, Infra 관점의 한 장 요약
-- `docs/API-명세.md`
-  - 현재 코드 기준 HTTP API 계약
-- `docs/RabbitMQ-명세.md`
-  - MQ 전환 시 기준 메시지 설계
-- `docs/Chroma-저장구조-ERD.md`
-  - Chroma 내부 저장 구조와 확인 방법
-- `docs/current-status.md`
-  - 현재 구현된 기능과 미구현 범위 기록
-- `docs/progress-log.md`
-  - 작업 진행 내역을 날짜순으로 누적 기록
-- `docs/sample-manual.txt`
-  - 로컬 ingest 테스트용 샘플 문서
-
-### Runtime / Packaging
-
-- `pyproject.toml`
-  - Python 의존성 및 테스트 설정
-- `.env.example`
-  - 로컬 개발용 환경변수 예시
-- `Dockerfile`
-  - 컨테이너 실행용 기본 이미지 설정
+| Feature | Description |
+| --- | --- |
+| OpenAI 호환 API | `/v1/chat/completions`, `/v1/embeddings` 형식의 외부 LLM/embedding 서버를 사용합니다. |
+| 임베딩 backend 선택 | `embedding_api`와 개발용 `hash` fallback을 지원합니다. |
+| Chroma backend 선택 | 로컬 persistent Chroma와 외부 ChromaDB HTTP server를 환경변수로 전환합니다. |
+| LangChain semantic chunking | PDF는 semantic chunking을 우선 시도하고 실패하면 native chunking으로 fallback합니다. |
+| Pydantic alias 호환 | `mail_tone/email_tone`, `intent/category_name`, `body/body_clean`처럼 인접 서비스 naming 차이를 흡수합니다. |
+| 단계적 template fallback | `intent + tone + domain`, `intent`, 필터 없음 순서로 검색 범위를 완화합니다. |
+| RabbitMQ progress | 작업 시작, 진행, 성공, 실패 이벤트를 `2app.rag.progress`로 발행합니다. |
+| Retry 판단 | 외부 API 429/5xx, 연결 오류, 일시적 파일 미존재 등 재시도 가능한 오류를 구분합니다. |
+| 컨테이너 실행 | Dockerfile은 Python 3.12 slim, Tesseract, healthcheck, combined server/worker start script를 포함합니다. |
 
 ## Quick Start
 
 ```bash
-cd rag
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-uvicorn app.main:app --reload
+cp .env.example .env
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8090
 ```
 
-RabbitMQ worker 실행:
+상태 확인:
 
 ```bash
-cd rag
+curl http://127.0.0.1:8090/health
+```
+
+기본 응답:
+
+```json
+{
+  "status": "ok",
+  "embedding_backend": "embedding_api",
+  "vector_backend": "chroma"
+}
+```
+
+외부 임베딩 API 없이 흐름만 확인하려면 `.env`에서 아래 값을 사용합니다.
+
+```text
+EMBEDDING_BACKEND=hash
+EMBEDDING_DIMENSIONS=384
+```
+
+## API
+
+| Method | Path | Role |
+| --- | --- | --- |
+| `GET` | `/health` | 서버 상태, embedding backend, vector backend 확인 |
+| `POST` | `/knowledge/ingest` | FAQ/manual을 한 번에 적재 |
+| `POST` | `/knowledge/index` | 이미 추출된 문서 텍스트를 chunk/index |
+| `POST` | `/knowledge/search` | 사용자별 knowledge chunk 검색 |
+| `POST` | `/templates/index` | 템플릿 검색 인덱스 저장 |
+| `POST` | `/templates/match` | 메일과 가까운 템플릿 후보 검색 |
+| `POST` | `/extract-text` | base64 파일 payload에서 텍스트 추출 |
+| `POST` | `/canonical/email` | 메일 검색용 canonical text 생성 |
+| `POST` | `/canonical/template` | 템플릿 검색용 canonical text 생성 |
+
+호환을 위해 `/v1/...` 경로도 함께 유지합니다.
+
+최종 백엔드 연동의 우선 API는 아래 네 개입니다.
+
+```text
+GET  /health
+POST /knowledge/ingest
+POST /templates/index
+POST /templates/match
+```
+
+## RabbitMQ
+
+worker 실행:
+
+```bash
 python -m app.worker
 ```
 
-기본 주소:
+| Queue | Routing Key | Role |
+| --- | --- | --- |
+| `q.2rag.knowledge.ingest` | `2rag.knowledge.ingest` | FAQ/manual ingest 요청 |
+| `q.2rag.templates.index` | `2rag.templates.index` | 템플릿 index 요청 |
+| `q.2rag.templates.match` | `2rag.templates.match` | 템플릿 match 요청 |
+| `q.2rag.draft` | `2rag.draft` | 온보딩 템플릿 생성 요청 |
+| `q.dlx.failed` | queue direct publish | 최종 실패 메시지 보관 |
 
-- `http://127.0.0.1:8090`
-- `GET /health`
+응답과 진행 이벤트는 `x.rag2app.direct` exchange로 발행합니다.
 
-## Main Endpoints
+| Routing Key | Role |
+| --- | --- |
+| `2app.knowledge.ingest` | knowledge ingest 결과 |
+| `2app.templates.index` | template index 결과 |
+| `2app.templates.match` | template match 결과 |
+| `2app.rag.draft` | onboarding draft 결과 |
+| `2app.rag.progress` | 진행 상태 이벤트 |
 
-- `GET /health`
-- `POST /knowledge/ingest`
-- `POST /templates/index`
-- `POST /templates/match`
+## How It Works
 
-호환 경로:
+```mermaid
+flowchart LR
+    A[Backend request or MQ message] --> B[RAG API / Worker]
+    B --> C{Job Type}
+    C -->|Knowledge ingest| D[Extract PDF/TXT text]
+    D --> E[Clean and chunk document]
+    E --> F[Create embeddings]
+    F --> G[Upsert knowledge collection]
+    C -->|Template index| H[Build template canonical text]
+    H --> I[Embed template]
+    I --> J[Upsert template collection]
+    C -->|Template match| K[Build email canonical text]
+    K --> L[Search template collection]
+    C -->|Draft| M[Search FAQ/manual context]
+    M --> N[Call OpenAI-compatible chat API]
+```
 
-- 기존 `/v1/...` 경로도 함께 유지한다.
+## Vector Storage
 
-## Notes
+RAG는 별도 비즈니스 DB를 두지 않고 Chroma에 검색용 파생 데이터만 저장합니다. 원본 데이터의 source of truth는 Backend DB입니다.
 
-- 운영 환경에서는 `LLM_API_BASE_URL`, `LLM_API_KEY`를 설정해 chat 생성에 사용합니다.
-- 현재 기본 임베딩 백엔드는 `EMBEDDING_BACKEND=embedding_api` 입니다.
-- 현재 기본 임베딩 모델은 `EMBEDDING_MODEL=text-embedding-3-small` 입니다.
-- OpenAI 임베딩만 별도로 쓰려면 `EMBEDDING_API_BASE_URL`, `EMBEDDING_API_KEY`를 설정하면 됩니다.
-- 생성은 기존 OpenAI 호환 서버를 유지하고, 임베딩만 OpenAI 공식 API로 분리하는 구성이 가능합니다.
-- `EMBEDDING_BACKEND=embedding_api`일 때 임베딩 차원은 API 응답에서 자동으로 학습합니다.
-- 기본 vector backend는 `VECTOR_BACKEND=chroma`입니다.
-- Chroma 데이터는 `CHROMA_PERSIST_DIRECTORY` 아래에 저장됩니다.
-- 외부 ChromaDB 서버를 쓸 때는 `VECTOR_BACKEND=chroma_http`, `CHROMA_HOST`, `CHROMA_PORT`, `CHROMA_SSL`을 설정합니다.
-- 운영 환경에서는 `CHUNKING_BACKEND=langchain`, `PDF_CHUNKING_STRATEGY=semantic` 조합을 권장합니다.
-- 이미지형 PDF를 처리하려면 서버에 `tesseract-ocr`와 필요한 언어 데이터(`kor`)를 설치해야 합니다.
-- OCR fallback은 `PDF_OCR_ENABLED`, `PDF_OCR_LANGUAGES`, `PDF_OCR_DPI`로 조절할 수 있습니다.
-- 학교 LLM 서버 운영 가이드 기준 기본 예시는 `http://cellm.gachon.ac.kr:8000/v1` 입니다.
-- 현재 기본 chat 모델 alias는 `LLM_CHAT_MODEL=text` 입니다.
-- RAG는 별도 DB를 두지 않는 방향을 기준으로 합니다.
-- 관계형 DB 대신 Chroma persistent storage로 벡터와 메타데이터를 관리합니다.
-- 공통 식별자와 HTTP 스타일은 가능한 범위에서 `AI/` 레포의 naming 규칙을 우선한다.
-- 루트 `docs/rag-*.md`는 서비스 전체 관점의 설계를 관리합니다.
-- `rag/docs/`는 RAG 모듈 자체의 연동 문서와 상태 문서를 관리합니다.
-- 진행 상황을 빠르게 보려면 아래 순서로 문서를 보면 됩니다.
-  - `rag/README.md`
-  - `rag/docs/연동-개요.md`
-  - `rag/docs/API-명세.md`
-  - `rag/docs/Chroma-저장구조-ERD.md`
-  - `rag/docs/current-status.md`
-  - `rag/docs/progress-log.md`
+| Namespace | Chroma Collection | Content |
+| --- | --- | --- |
+| `knowledge:1` | `knowledge_1` | user 1의 FAQ/manual chunk |
+| `template:1` | `template_1` | user 1의 template canonical text |
+| `knowledge:2` | `knowledge_2` | user 2의 FAQ/manual chunk |
+| `template:2` | `template_2` | user 2의 template canonical text |
+
+local persistent mode:
+
+```text
+VECTOR_BACKEND=chroma
+CHROMA_PERSIST_DIRECTORY=.rag-data/chroma
+```
+
+external ChromaDB server mode:
+
+```text
+VECTOR_BACKEND=chroma_http
+CHROMA_HOST=localhost
+CHROMA_PORT=8000
+CHROMA_SSL=false
+```
+
+collection 확인:
+
+```bash
+python scripts/check_chroma.py
+```
+
+## Folder Structure
+
+```text
+RAG/
+├─ app/
+│  ├─ main.py                      # FastAPI HTTP API
+│  ├─ worker.py                    # RabbitMQ consumer / publisher
+│  ├─ config.py                    # 환경변수 기반 설정
+│  ├─ schemas.py                   # HTTP API schema
+│  ├─ mq/
+│  │  └─ schemas.py                # MQ message schema
+│  └─ services/
+│     ├─ canonicalization.py       # email/template canonical text
+│     ├─ chunking.py               # native chunking
+│     ├─ document_chunking.py      # document split orchestration
+│     ├─ document_parser.py        # TXT/PDF/local/presigned URL/OCR extraction
+│     ├─ draft_service.py          # onboarding template generation
+│     ├─ embedding.py              # embedding_api/hash backend
+│     ├─ index_store.py            # Chroma vector store
+│     ├─ openai_compatible_client.py
+│     └─ runtime.py                # shared service instances
+├─ docs/
+├─ docker/
+├─ scripts/
+├─ tests/
+├─ .env.example
+├─ Dockerfile
+├─ pyproject.toml
+└─ README.md
+```
+
+## Environment
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `RAG_HOST` | `0.0.0.0` | API bind host |
+| `RAG_PORT` | `8090` | API port |
+| `MOCK_MODE` | `false` | LLM 호출 없이 mock 생성 사용 여부 |
+| `LLM_API_BASE_URL` | `http://cellm.gachon.ac.kr:8000/v1` | OpenAI 호환 chat API base URL |
+| `LLM_API_KEY` | empty | chat API key |
+| `LLM_CHAT_MODEL` | `text` | chat model alias |
+| `EMBEDDING_API_BASE_URL` | empty | 비어 있으면 LLM API base URL 재사용 |
+| `EMBEDDING_API_KEY` | empty | 비어 있으면 LLM API key 재사용 |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` | embedding model alias |
+| `EMBEDDING_BACKEND` | `embedding_api` | `embedding_api` 또는 `hash` |
+| `VECTOR_BACKEND` | `chroma` | `chroma` 또는 `chroma_http` |
+| `CHUNKING_BACKEND` | `langchain` | `langchain` 또는 native fallback |
+| `PDF_CHUNKING_STRATEGY` | `semantic` | PDF chunking strategy |
+| `PDF_OCR_ENABLED` | `true` | 이미지형 PDF OCR fallback |
+| `PDF_OCR_LANGUAGES` | `kor` | Tesseract OCR language |
+| `MAX_UPLOAD_BYTES` | `10485760` | payload/download size limit |
+| `RABBITMQ_*` | see `.env.example` | worker connection, queue, routing 설정 |
+
+## Docker
+
+```bash
+docker build -t maily-rag .
+docker run --rm -p 8090:8090 --env-file .env maily-rag
+```
+
+이미지는 `tesseract-ocr`와 `tesseract-ocr-kor`를 포함하고, `/health` 기반 healthcheck를 제공합니다.
+
+## Tech Stack
+
+| Layer | Technology | Role |
+| --- | --- | --- |
+| API | FastAPI, Uvicorn | HTTP endpoint |
+| Schema | Pydantic v2, pydantic-settings | request/response/env validation |
+| Vector DB | ChromaDB | persistent / HTTP vector storage |
+| Embedding | OpenAI-compatible embeddings, hash fallback | semantic search vector |
+| Chunking | LangChain text splitters, native paragraph chunker | document split |
+| PDF | PyMuPDF, Tesseract OCR | PDF text extraction and OCR fallback |
+| MQ | RabbitMQ, pika | asynchronous job consume/publish |
+| Test | pytest, httpx | unit/API tests |
+
+## Tests
+
+```bash
+pytest
+```
+
+현재 테스트는 canonicalization, chunking, document parser/chunking, draft service, index store, HTTP endpoint, OpenAI 호환 client/service 경로를 다룹니다.
+
+## Docs
+
+| Document | Role |
+| --- | --- |
+| [docs/README.md](docs/README.md) | RAG 문서 인덱스 |
+| [docs/연동-개요.md](docs/연동-개요.md) | Backend/AI/Infra 연결 개요 |
+| [docs/API-명세.md](docs/API-명세.md) | HTTP API 계약 |
+| [docs/RabbitMQ-명세.md](docs/RabbitMQ-명세.md) | MQ topology와 메시지 계약 |
+| [docs/Chroma-저장구조-ERD.md](docs/Chroma-저장구조-ERD.md) | Chroma 저장 구조 |
+| [docs/로컬-UI-연동-및-배포-체크리스트.md](docs/로컬-UI-연동-및-배포-체크리스트.md) | 로컬 UI/E2E 확인 경로 |
+
+## Caution
+
+- `hash` embedding은 개발용 fallback이며 운영 semantic 품질을 대체하지 않습니다.
+- 이미지형 PDF 처리는 서버에 Tesseract와 언어 데이터가 설치되어 있어야 합니다.
+- `templates/match`는 후보 검색을 수행하며, 사용 이력이나 비즈니스 규칙 기반 최종 rerank는 Backend 책임입니다.
+- RAG 저장소는 검색용 파생 데이터만 보관합니다. 원본 FAQ, manual, template의 source of truth는 Backend DB입니다.
+- RabbitMQ topology는 운영 환경에서 retry queue, DLQ, TTL 정책과 함께 인프라 레벨에서 고정하는 것을 권장합니다.
